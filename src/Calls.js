@@ -16,7 +16,7 @@ class BastyonCalls extends EventEmitter {
     this.initEvents();
     this.initSignals();
     this.initTemplates(root);
-    /*this.initCordovaPermisions()*/ /// TODO
+    // this.initCordovaPermisions() /// Moved to be called when actually needed
     this.options = options;
     this.initAudioEventListeners();
     this.initCallKitIntegration();
@@ -57,26 +57,13 @@ class BastyonCalls extends EventEmitter {
           () => console.log("App name set"),
           (err) => console.error("App name error:", err),
         );
-        window.CordovaCall.setIncludeInRecents(
+        window.cordova.plugins.CordovaCall.setIncludeInRecents(
           true,
           () => console.log("Include in recents enabled"),
           (err) => console.error("Include in recents error:", err),
         );
 
-        window.cordova.plugins.CordovaCall.on("answer", (data) => {
-          console.log("CallKit answered:", data);
-          this.handleCallKitAnswer(data);
-        });
-
-        window.cordova.plugins.CordovaCall.on("reject", (data) => {
-          console.log("CallKit rejected:", data);
-          this.handleCallKitReject(data);
-        });
-
-        window.cordova.plugins.CordovaCall.on("hangup", (data) => {
-          console.log("CallKit hangup:", data);
-          this.handleCallKitHangup(data);
-        });
+        // Events are now registered in registerCordovaCallEvents() method
 
         console.log("CallKit initialized successfully");
         this.callKitPlugin = window.cordova.plugins.CordovaCall;
@@ -579,6 +566,11 @@ class BastyonCalls extends EventEmitter {
   answer(callType = CallTypes.video) {
     const _isVideoCall = isVideoCall(callType);
     this.signal?.pause();
+
+    if (!this.activeCall) {
+      console.error("No active call to answer");
+      return;
+    }
 
     const answerActiveCall = () => this.activeCall.answer(true, _isVideoCall);
     this.initCordovaPermisions(callType)
@@ -1956,9 +1948,43 @@ class BastyonCalls extends EventEmitter {
     window.BastyonCallsInstance = this;
     this.callKitCalls = {};
 
+    // Register events immediately when Cordova is available
     if (window.cordova?.plugins?.CordovaCall) {
+      this.registerCordovaCallEvents();
       this.setupCallKit();
+    } else {
+      // Listen for deviceready event in case Cordova isn't ready yet
+      document.addEventListener('deviceready', () => {
+        if (window.cordova?.plugins?.CordovaCall) {
+          this.registerCordovaCallEvents();
+          this.setupCallKit();
+        }
+      }, false);
     }
+  }
+
+  registerCordovaCallEvents() {
+    if (!window.cordova?.plugins?.CordovaCall) return;
+
+    console.log("Registering CordovaCall events immediately");
+
+    // Register answer event first and immediately
+    window.cordova.plugins.CordovaCall.on("answer", (data) => {
+      console.log("CallKit answered:", data);
+      this.handleCallKitAnswer(data);
+    });
+
+    window.cordova.plugins.CordovaCall.on("reject", (data) => {
+      console.log("CallKit rejected:", data);
+      this.handleCallKitReject(data);
+    });
+
+    window.cordova.plugins.CordovaCall.on("hangup", (data) => {
+      console.log("CallKit hangup:", data);
+      this.handleCallKitHangup(data);
+    });
+
+    console.log("CordovaCall events registered successfully");
   }
 
   isCallKitAvailable() {
@@ -1996,7 +2022,8 @@ class BastyonCalls extends EventEmitter {
           () => console.log("CallKit call displayed"),
           (err) => {
             console.error("CallKit receiveCall error:", err);
-            this.showWebIncomingCall(call);
+            // Fallback to web incoming call interface
+            this.renderTemplates.incomingCall(call);
           },
         );
         return;
@@ -2016,10 +2043,89 @@ class BastyonCalls extends EventEmitter {
   }
 
   handleCallKitAnswer(data) {
+    console.log("CallKit handleCallKitAnswer called with:", data);
     const call = this.callKitCalls[data.callUUID];
     if (call) {
+      console.log("CallKit found call:", call.callId, "current state:", call.state);
       const callType = data.isVideo ? CallTypes.video : CallTypes.voice;
-      this.answer(callType);
+
+      // Ensure the call is set as activeCall before answering
+      if (!this.activeCall || this.activeCall.callId !== call.callId) {
+        console.log("CallKit setting activeCall to:", call.callId);
+        this.activeCall = call;
+      }
+
+      // Stop any incoming call sound
+      this.signal?.pause();
+
+      // Clear incoming call UI
+      this.renderTemplates.clearNotify();
+
+      // Add listeners to handle call state changes for CallKit
+      if (!call.callKitAnswered) {
+        call.callKitAnswered = true;
+        console.log("CallKit adding state listener for call:", call.callId);
+
+        // Listen for call state changes
+        call.on("state", (state) => {
+          console.log("CallKit call state changed to:", state, "for call:", call.callId);
+          if (state === "connected") {
+            console.log("CallKit call connected successfully");
+            // Now sync the call state in Cordova
+            if (window.cordova?.plugins?.CordovaCall) {
+              window.cordova.plugins.CordovaCall.connectCall(
+                () => console.log("Cordova call state synchronized"),
+                (err) => console.error("Cordova sync error:", err)
+              );
+            }
+          } else if (state === "ended") {
+            console.log("CallKit call ended, reason unknown");
+          }
+        });
+
+        // Listen for hangup events
+        call.on("hangup", (reason) => {
+          console.log("CallKit call hangup with reason:", reason, "for call:", call.callId);
+        });
+
+        // Listen for error events
+        call.on("error", (error) => {
+          console.log("CallKit call error:", error, "for call:", call.callId);
+        });
+      }
+
+      // Log current call state
+      console.log("CallKit call current state:", call.state);
+
+      // Instead of calling this.answer(), manually handle the Matrix call answer
+      console.log("CallKit handling Matrix call answer with type:", callType);
+
+      if (call.state === "ringing") {
+        const _isVideoCall = callType === CallTypes.video;
+
+        // Setup call permissions and interface
+        this.initCordovaPermisions(callType).then(() => {
+          try {
+            // Answer the Matrix call
+            call.answer(true, _isVideoCall);
+
+            // Setup call interface
+            this.renderTemplates.call(callType);
+
+            console.log("CallKit Matrix call answered successfully");
+          } catch (error) {
+            console.error("CallKit error answering Matrix call:", error);
+          }
+        }).catch((error) => {
+          console.error("CallKit permission error:", error);
+        });
+      } else {
+        console.log("CallKit call not in ringing state, current state:", call.state);
+        // Just setup the interface if call is already answered
+        this.renderTemplates.call(callType);
+      }
+    } else {
+      console.error("CallKit call not found for UUID:", data.callUUID);
     }
   }
 
